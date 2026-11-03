@@ -29,7 +29,7 @@ def check(root: Path) -> list[str]:
     errors: list[str] = []
     for name in REQUIRED_FILES:
         p = root / name
-        if not p.is_file() or p.stat().st_size == 0:
+        if not p.is_file() or (name != ".nojekyll" and p.stat().st_size == 0):
             errors.append(f"Required site file is missing or empty: {name}")
 
     for name in DATA_FILES:
