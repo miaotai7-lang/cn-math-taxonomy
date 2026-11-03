@@ -1,0 +1,53 @@
+name: Backup stable eight-subject source (never deploy)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    # Every Sunday 09:42 JST; scheduled GitHub Actions may be delayed.
+    - cron: '42 0 * * 0'
+
+# Read-only: this workflow cannot change branches, tags, or deployments.
+permissions:
+  contents: read
+
+concurrency:
+  group: cnm-stable-backup
+  cancel-in-progress: false
+
+jobs:
+  archive-stable-main:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out current stable main with complete history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate the stable site and backup script
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tests -p test_upstream_candidate.py -v
+          python3 tools/check_upstream_candidate.py .
+          python3 -m unittest discover -s tests -p test_backup_contract.py -v
+          python3 -m unittest discover -s tests -p test_backup_integration.py -v
+          bash -n tools/create_stable_backup.sh
+
+      - name: Create and verify ZIP plus full-history Git Bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash tools/create_stable_backup.sh "$RUNNER_TEMP/cnm-stable-backup"
+
+      - name: Upload short-retention backup artifact (not an external backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: cnm-stable-${{ github.sha }}
+          path: ${{ runner.temp }}/cnm-stable-backup/
+          if-no-files-found: error
+          retention-days: 30
