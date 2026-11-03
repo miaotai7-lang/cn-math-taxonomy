@@ -59,9 +59,11 @@ jobs:
           sha=$(git rev-parse original/main)
           short_sha=${sha:0:12}
           candidate="review/upstream-${short_sha}"
+          existing_candidate=false
           if git ls-remote --exit-code --heads origin "$candidate" >/dev/null 2>&1; then
-            echo "Candidate branch $candidate already exists; inspect it manually." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            existing_candidate=true
+            git fetch --no-tags origin \
+              "refs/heads/$candidate:refs/remotes/origin/$candidate"
           fi
 
           git switch -c "$candidate"
@@ -88,7 +90,19 @@ jobs:
           node --check sw.js
 
           # No deploy, no push to main. Just a candidate branch plus a draft PR.
-          git push origin "HEAD:refs/heads/${candidate}"
+          if [ "$existing_candidate" = true ]; then
+            expected_tree=$(git rev-parse 'HEAD^{tree}')
+            stored_tree=$(git rev-parse "refs/remotes/origin/${candidate}^{tree}")
+
+            if [ "$expected_tree" != "$stored_tree" ]; then
+              echo "Existing candidate differs from validated merge; manual review required." >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+
+            echo "Reusing verified candidate branch $candidate." >> "$GITHUB_STEP_SUMMARY"
+          else
+            git push origin "HEAD:refs/heads/${candidate}"
+          fi
           cat > "$RUNNER_TEMP/upstream-pr.md" <<EOF
           Proposed upstream commit: $sha from https://github.com/xiaoyang111222/cn-math-taxonomy
 
