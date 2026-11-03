@@ -58,7 +58,8 @@ jobs:
 
           sha=$(git rev-parse original/main)
           short_sha=${sha:0:12}
-          candidate="review/upstream-${short_sha}"
+          base_sha=$(git rev-parse HEAD)
+          candidate="review/upstream-${short_sha}-base-${base_sha:0:12}"
           existing_candidate=false
           if git ls-remote --exit-code --heads origin "$candidate" >/dev/null 2>&1; then
             existing_candidate=true
