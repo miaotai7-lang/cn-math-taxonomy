@@ -1,0 +1,111 @@
+name: Review upstream updates (never auto-merge)
+
+on:
+  schedule:
+    # 09:27 JST, subject to GitHub Actions scheduling delays.
+    - cron: '27 0 * * *'
+  workflow_dispatch:
+
+# The token may open a review PR but must never deploy or merge it.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: cnm-upstream-review
+  cancel-in-progress: false
+
+jobs:
+  prepare-candidate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out our stable branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Test and preserve trusted validator
+        run: |
+          python3 -m unittest discover -s tests -p test_upstream_candidate.py -v
+          python3 tools/check_upstream_candidate.py .
+          cp tools/check_upstream_candidate.py "$RUNNER_TEMP/check_upstream_candidate.py"
+
+      - name: Fetch upstream and open a review PR only when needed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add original https://github.com/xiaoyang111222/cn-math-taxonomy.git
+          git fetch --no-tags original main
+          git fetch --no-tags origin main
+
+          if git merge-base --is-ancestor original/main HEAD; then
+            echo 'No new upstream commits. Stable site remains unchanged.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          count=$(gh pr list --state open --base main --json headRefName --jq '[.[] | select(.headRefName | startswith("review/upstream-"))] | length')
+          if [ "$count" -gt 0 ]; then
+            echo 'An upstream candidate PR is already open. Review it before importing another update.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          sha=$(git rev-parse original/main)
+          short_sha=${sha:0:12}
+          candidate="review/upstream-${short_sha}"
+          if git ls-remote --exit-code --heads origin "$candidate" >/dev/null 2>&1; then
+            echo "Candidate branch $candidate already exists; inspect it manually." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git switch -c "$candidate"
+          if ! git merge --no-ff --no-edit original/main; then
+            echo 'Upstream merge conflicts with fork changes. No branch was published; manual resolution required.' >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort || true
+            exit 1
+          fi
+
+          # Never import unreviewed upstream CI workflows or replace the guard itself.
+          changed_guard=$(git diff --name-only origin/main HEAD -- .github/workflows tools/check_upstream_candidate.py tests/test_upstream_candidate.py)
+          if [ -n "$changed_guard" ]; then
+            echo "Upstream changed automation/guard files; blocked: $changed_guard" >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          # Execute only validator captured from our stable main BEFORE upstream merge.
+          python3 "$RUNNER_TEMP/check_upstream_candidate.py" .
+          node --check assets/home.js
+          node --check explore/app.js
+          node --check diagnose/app.js
+          node --check diagnose/engine.js
+          node --check diagnose/share.js
+          node --check sw.js
+
+          # No deploy, no push to main. Just a candidate branch plus a draft PR.
+          git push origin "HEAD:refs/heads/${candidate}"
+          cat > "$RUNNER_TEMP/upstream-pr.md" <<EOF
+          Proposed upstream commit: $sha from https://github.com/xiaoyang111222/cn-math-taxonomy
+
+          This is a **candidate only**. It was not deployed, merged, or approved.
+
+          Automated checks: required pages, eight subject selectors, five JSON datasets, CC BY-NC license, local share QR, disabled original analytics, JavaScript syntax. This is **not** a security audit or browser acceptance test.
+
+          Before manual merge:
+          - [ ] Review every change to JS/HTML, network calls, third-party links, and PWA/cache updates.
+          - [ ] Confirm analytics endpoint remains blank and sharing stays on this fork.
+          - [ ] Check eight subjects, graphs, diagnosis, child profiles, Windows/Android/iPad, offline PWA.
+          - [ ] Save an independent ZIP backup and record the stable commit/tag.
+          - [ ] Confirm CC BY-NC 4.0 attribution and noncommercial use.
+
+          Merging this PR into main will publish via GitHub Pages; **merge only after owner approval**.
+          EOF
+          gh pr create --base main --head "$candidate" --draft \
+            --title "Review upstream update ${short_sha}" \
+            --body-file "$RUNNER_TEMP/upstream-pr.md"
+          echo "Prepared candidate $candidate for human review; main was not changed." >> "$GITHUB_STEP_SUMMARY"
